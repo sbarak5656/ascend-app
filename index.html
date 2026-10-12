@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e0561f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/favicon-64.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<title>Ascend</title>
+<link rel="stylesheet" href="app.css" id="uiCss">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h4l2.5-4.5 3 8L16 4l2.5 9H21"/></svg></span>
+      <span>Ascend</span>
+    </div>
+    <nav class="tabs" id="tabs" aria-label="Main"></nav>
+    <button class="iconbtn" id="theme" title="Toggle light / dark" aria-label="Toggle light or dark theme">◐</button>
+  </div>
+</header>
+<main class="wrap" id="app"></main>
+
+<div id="rest" role="timer" aria-live="off">
+  <div class="rt"><span id="restLabel">Rest</span><button id="restStop">Skip</button></div>
+  <div class="rm"><button id="restMinus" aria-label="15 seconds less">−15s</button><b id="restTime">0:00</b><button id="restPlus" aria-label="15 seconds more">+15s</button></div>
+  <div class="rb"><i id="restBar"></i></div>
+</div>
+<div id="modal"><div class="sheet" id="sheet"></div></div>
+<div id="toast" role="status"><span id="toastMsg"></span></div>
+
+<script src="config.js"></script>
+<script src="program.js"></script>
+<script src="ui-version.js"></script>
+<script>
+/* Boot loader (not hot-updatable).
+   Runs the bundled UI (app.css + app.js), or a newer UI downloaded earlier over the air — but only if its
+   signature verifies against the public key built into this app. A UI that crashed on its first run is
+   discarded automatically and the bundled one is used instead. */
+(function () {
+  "use strict";
+  var LS = "climbprog.ui", PEND = "climbprog.ui.pending", BAD = "climbprog.ui.bad";
+  var bundled = window.UI_BUNDLED_VERSION || 0, pub = window.UI_PUBLIC_KEY || null;
+  window.UI_RUNNING_VERSION = bundled;
+  window.UI_SOURCE = "bundled";
+
+  function b64(s) { var bin = atob(s), a = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; }
+  window.__uiVerify = function (b) {
+    try {
+      if (!pub || !window.crypto || !crypto.subtle || !b || !b.sig || !b.js || !b.css) return Promise.resolve(false);
+      var data = new TextEncoder().encode(b.version + "\n" + b.css + "\n" + b.js);
+      return crypto.subtle.importKey("jwk", pub, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"])
+        .then(function (k) { return crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, k, b64(b.sig), data); })
+        .catch(function () { return false; });
+    } catch (e) { return Promise.resolve(false); }
+  };
+
+  function loadBundled() {
+    var s = document.createElement("script");
+    s.src = "app.js";
+    document.body.appendChild(s);
+  }
+  function runLive(b) {
+    var st = document.createElement("style");
+    st.textContent = b.css;
+    document.head.appendChild(st);
+    var old = document.getElementById("uiCss"); if (old) old.remove();
+    var sc = document.createElement("script");
+    sc.textContent = b.js;
+    document.body.appendChild(sc);
+  }
+
+  var cached = null;
+  try { cached = JSON.parse(localStorage.getItem(LS) || "null"); } catch (e) {}
+  if (!cached || !(cached.version > bundled)) return loadBundled();
+
+  if (localStorage.getItem(PEND) === String(cached.version)) {       // it never finished starting last time
+    try { localStorage.setItem(BAD, String(cached.version)); localStorage.removeItem(LS); localStorage.removeItem(PEND); } catch (e) {}
+    return loadBundled();
+  }
+  window.__uiVerify(cached).then(function (ok) {
+    if (!ok) { try { localStorage.removeItem(LS); } catch (e) {} return loadBundled(); }
+    try { localStorage.setItem(PEND, String(cached.version)); } catch (e) {}
+    window.UI_RUNNING_VERSION = cached.version;
+    window.UI_SOURCE = "live";
+    runLive(cached);
+    // watchdog: if the live UI hasn't drawn anything shortly after start, abandon it and relaunch with the bundled UI
+    setTimeout(function () {
+      var app = document.getElementById("app");
+      if (app && app.children.length === 0) {
+        try { localStorage.setItem(BAD, String(cached.version)); localStorage.removeItem(LS); localStorage.removeItem(PEND); } catch (e) {}
+        location.reload();
+      }
+    }, 2500);
+  });
+})();
+</script>
+</body>
+</html>
