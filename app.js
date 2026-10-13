@@ -13,7 +13,7 @@ try {
 } catch (e) {}
 
 /* ---------------- state ---------------- */
-const blankState = () => ({ schema:2, start:"", checks:{}, done:{}, grades:{}, weights:[], notes:{}, swaps:{},
+const blankState = () => ({ schema:2, start:"", checks:{}, sets:{}, done:{}, grades:{}, weights:[], notes:{}, swaps:{},
                             tests:[], focus:[], contentUrl:"", lastCheck:"" });
 let S = blankState();
 try {
@@ -262,6 +262,24 @@ function dayStatus(w, d){
   const p = progress(w, d);
   return p.done ? "done" : (p.c > 0 ? "part" : "");
 }
+function celebrate(){
+  try {
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const colors = ["#f39a47", "#d9481b", "#2f7be0", "#1f9d55", "#f2c14e", "#9b6bff"];
+    const box = h("div", {class:"confetti", "aria-hidden":"true"});
+    for (let i = 0; i < 30; i++){
+      box.append(h("i", {style:`left:${Math.random()*100}%;background:${colors[i % colors.length]};animation-delay:${(Math.random()*.3).toFixed(2)}s;--dx:${Math.round((Math.random()*2-1)*110)}px;--r:${Math.round(Math.random()*720)}deg`}));
+    }
+    document.body.append(box);
+    setTimeout(() => box.remove(), 2400);
+  } catch (e) {}
+}
+function programProgress(){
+  let done = 0, total = 0;
+  P.weeks.forEach(w => { const wp = weekProgress(w.n); done += wp.done; total += wp.total; });
+  return { done, total, pct: total ? Math.round(100 * done / total) : 0 };
+}
+
 /* ---------------- weekly plan: which days train which body areas ---------------- */
 const AREA_ORDER = ["climb", "lower", "upper", "core", "cardio", "recovery"];
 const STRENGTH_AREAS = ["lower", "upper", "core"];
@@ -452,17 +470,24 @@ function sessionCard(w, d){
   const key = dayKey(w, d), phase = phaseOf(w);
   const all = dayItems(w, d);
   const ringEl = ring(0), count = h("span", {class:"glass num"});
+  const sbar = h("i", {}), stext = h("b", {});
   const doneBtn = h("button", {class:"btn block"});
+  let wasComplete = null;
   const repaint = () => {
     const p = progress(w, d);
     ringEl.set(p.done ? 100 : p.pct);
     count.textContent = `${p.c}/${p.n} steps`;
+    sbar.style.width = (p.done ? 100 : p.pct) + "%";
+    stext.textContent = `${p.c}/${p.n}`;
+    const complete = p.n > 0 && p.c === p.n;
+    if (wasComplete === false && complete){ celebrate(); buzz([40, 60, 40]); toast("Every step done — mark the session complete 💪"); }
+    wasComplete = complete;
     doneBtn.textContent = p.done ? "✓ Session done — tap to undo" : "Mark session done";
     doneBtn.className = "btn block" + (p.done ? " ghost" : "");
   };
   doneBtn.onclick = () => {
     if (S.done[key]) delete S.done[key];
-    else { S.done[key] = 1; buzz(40); toast("Session logged — nice work 💪"); }
+    else { S.done[key] = 1; buzz(40); celebrate(); toast("Session logged — nice work 💪"); }
     save(); repaint();
   };
 
@@ -481,12 +506,41 @@ function sessionCard(w, d){
     const plain = !alt && it.name && !it.rx ? it.detail : "";
     const label = name || it.text.slice(0, 40);
 
+    const nSets = (() => { const m = rx.match(/^(\d{1,2})\s*[×x]/); return m && +m[1] >= 2 && +m[1] <= 8 ? +m[1] : 0; })();
+    S.sets = S.sets || {};
+    let paintSets = () => {};
     const li = h("li", {class:"item" + (S.checks[ck] ? " done" : "")});
     const box = h("input", {type:"checkbox", class:"check", checked:S.checks[ck], "aria-label":"Done: " + label, onchange:() => {
-      box.checked ? S.checks[ck] = 1 : delete S.checks[ck];
-      li.classList.toggle("done", box.checked); save(); repaint();
-      if (box.checked){ buzz(15); if (restSec) startRest(restSec, "Rest · " + label); }
+      if (box.checked){ S.checks[ck] = 1; if (nSets) S.sets[ck] = nSets; }
+      else { delete S.checks[ck]; delete S.sets[ck]; }
+      li.classList.toggle("done", box.checked); paintSets(); save(); repaint();
+      if (box.checked){ buzz(15); if (restSec && !nSets) startRest(restSec, "Rest · " + label); }
     }});
+    let setsEl = null;
+    if (nSets){
+      const dots = [];
+      paintSets = () => {
+        const n = S.sets[ck] || (S.checks[ck] ? nSets : 0);
+        dots.forEach((b, i) => { b.classList.toggle("on", i < n); b.setAttribute("aria-pressed", i < n ? "true" : "false"); });
+      };
+      for (let i = 0; i < nSets; i++){
+        dots.push(h("button", {class:"setdot", "aria-label":`Set ${i + 1} of ${nSets}`, onclick:() => {
+          const cur = S.sets[ck] || (S.checks[ck] ? nSets : 0);
+          const next = (i + 1 === cur) ? i : i + 1;            // tap the last filled set again to undo it
+          S.sets[ck] = next;
+          const all = next >= nSets;
+          if (all) S.checks[ck] = 1; else delete S.checks[ck];
+          box.checked = all; li.classList.toggle("done", all);
+          save(); paintSets(); repaint();
+          if (next > cur){
+            buzz(15);
+            if (!all && restSec) startRest(restSec, `Rest · set ${next} of ${nSets} · ${label}`);
+          }
+        }}, String(i + 1)));
+      }
+      setsEl = h("div", {class:"setrow"}, h("span", {class:"muted small"}, "Sets"), dots);
+      paintSets();
+    }
 
     const meta = [];
     if (sets) meta.push(h("span", {class:"chip rx"}, sets));
@@ -508,6 +562,7 @@ function sessionCard(w, d){
     li.append(box, h("div", {class:"body"},
       name ? h("div", {class:"name"}, name) : h("div", {class:"txt"}, it.text),
       meta.length ? h("div", {class:"chips"}, meta) : null,
+      setsEl,
       plain ? h("div", {class:"txt muted"}, plain) : null,
       note ? h("div", {class:"note"}, note) : null,
       alt ? h("div", {class:"swapnote"}, "Swapped from: " + (it.name || it.text.slice(0, 40))) : null,
@@ -567,6 +622,7 @@ function sessionCard(w, d){
       h("div", {class:"sub"}, `${day.day} · ${week.name}`),
       ringEl,
       h("div", {class:"heroacts"}, count, awakeBtn)),
+    h("div", {class:"stickybar", "aria-hidden":"true"}, h("div", {class:"bar"}, sbar), stext),
     week.intro.length ? h("div", {class:"callout info"}, week.intro) : null,
     day.note ? h("div", {class:"callout info small"}, h("b", {}, "Strength focus: "), day.note) : null,
     mobCard(),
@@ -576,6 +632,36 @@ function sessionCard(w, d){
     week.notes.map(n => h("div", {class:"callout warn"}, h("b", {}, "Note: "), n)));
   repaint();
   return card;
+}
+
+function statTile(k, v, u){
+  return h("div", {class:"stat"}, h("span", {class:"k"}, k), h("b", {class:"v"}, v), h("span", {class:"u"}, u));
+}
+function todayHead(pos){
+  const hr = new Date().getHours();
+  const hello = hr < 5 ? "Burning the midnight oil" : hr < 12 ? "Good morning" : hr < 18 ? "Good afternoon" : "Good evening";
+  const when = new Date().toLocaleDateString(undefined, { weekday:"long", day:"numeric", month:"long" });
+  const wp = weekProgress(pos.week);
+  return h("section", {class:"todayhead"},
+    h("div", {class:"greet"}, h("div", {class:"muted"}, hello), h("h1", {}, when)),
+    h("div", {class:"stats"},
+      statTile("Week", String(pos.week), "of 12"),
+      statTile("This week", `${wp.done}/${wp.total}`, "workouts"),
+      statTile("Logged", String(Object.keys(S.done).length), "sessions")));
+}
+function comingUp(pos){
+  const out = [];
+  let w = pos.week, d = pos.dow;
+  for (let k = 0; k < 14 && out.length < 3; k++){
+    d++; if (d > 6){ d = 0; w++; }
+    if (w > 12) break;
+    const day = P.weeks[w - 1].days[d];
+    if (!day.rest) out.push({ w, d, day });
+  }
+  if (!out.length) return null;
+  return h("div", {class:"card"}, h("h2", {}, "Coming up"),
+    h("div", {class:"stack"}, out.map(x => h("a", {class:"planprev", href:`#day/${x.w}/${x.d}`},
+      h("span", {class:"d"}, DAY_SHORT[x.d]), h("span", {}, x.day.title), icon(dayKind(x.day), 18)))));
 }
 
 views.today = () => {
@@ -598,9 +684,11 @@ views.today = () => {
     h("div", {class:"row"}, h("a", {class:"btn", href:"#tests/report"}, "See my report"), h("a", {class:"btn ghost", href:"#log"}, "Open log")), startRow];
   const due = testDue();
   return [
+    todayHead(pos),
     weekStrip(pos.week, pos.dow),
     due ? h("div", {class:"callout warn"}, h("b", {}, `Performance test due — week ${due.week} (${due.label}). `), h("a", {href:"#tests/new"}, "Run it this week")) : null,
     sessionCard(pos.week, pos.dow),
+    comingUp(pos),
     h("div", {class:"row spread", style:"margin:4px 0 14px"},
       h("a", {class:"btn ghost sm", href:`#week/${pos.week}`}, "Whole week"),
       h("a", {class:"btn ghost sm", href:"#program"}, "Full program")),
@@ -610,7 +698,12 @@ views.today = () => {
 views.program = () => {
   const pos = position();
   const plan = currentPlan();
+  const pp = programProgress();
   return [h("h1", {class:"page-title"}, "Program"),
+    h("div", {class:"card overall"},
+      h("div", {class:"row spread"}, h("span", {class:"muted small"}, "Overall progress"), h("b", {}, pp.pct + "%")),
+      h("div", {class:"bar"}, h("i", {style:`width:${pp.pct}%`})),
+      h("span", {class:"muted small"}, `${pp.done} of ${pp.total} workouts completed${pos ? " · week " + Math.min(12, Math.max(1, pos.week)) + " of 12" : ""}`)),
     h("div", {class:"card"},
       h("div", {class:"row spread", style:"margin-bottom:10px"}, h("h2", {style:"margin:0"}, "Your weekly plan"), h("a", {class:"btn sm", href:"#plan"}, "Edit plan")),
       h("div", {class:"planmini"}, plan.map((t, d) => h("div", {class:"pm" + (t.length ? "" : " off")},
