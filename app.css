@@ -248,6 +248,25 @@ details summary{cursor:pointer;font-weight:650}
 
 /* ---- motion ---- */
 #app>*{animation:rise .28s ease-out both}
-#app>*:nth-child(2){animation-delay:.03s} #app>*:nth-child(3){animation-delay:.06s} #app>*:nth-child(4){animation-delay:.09s}
-@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes rise{from{opacity:.35;transform:translateY(6px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}html{scroll-behavior:auto}}
+
+/* ---- weekly plan + matched mobility ---- */
+.planmini{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.planmini .pm{display:grid;gap:3px;justify-items:center;text-align:center;padding:8px 2px;border-radius:12px;background:var(--accent-soft);font-size:11px;line-height:1.25;min-height:64px;align-content:start}
+.planmini .pm b{font-size:12px}
+.planmini .pm.off{background:var(--card-2);color:var(--muted)}
+.planrow{display:grid;grid-template-columns:96px 1fr;gap:10px;align-items:start;padding:12px 0;border-top:1px solid var(--line)}
+.planrow:first-of-type{border-top:0}
+.planrow .pd{display:grid;gap:2px}
+.planrow .chip{cursor:pointer}
+.preset{display:grid;gap:3px;text-align:left;background:var(--card-2);border:1.5px solid var(--line);border-radius:14px;padding:12px 14px}
+.preset.on{border-color:var(--accent);background:var(--accent-soft)}
+.planprev{display:grid;grid-template-columns:44px 1fr auto;gap:8px;align-items:center;text-decoration:none;color:inherit;padding:10px 12px;border-radius:12px;background:var(--card-2)}
+.planprev .d{font-weight:800;font-size:13px;color:var(--muted)}
+.mobrow{display:grid;grid-template-columns:58px 1fr;gap:8px;align-items:start;margin:8px 0}
+.mobwhen{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding-top:7px}
+.matchrow{padding:12px 0;border-top:1px solid var(--line)}
+.matchrow:first-of-type{border-top:0}
+.dots i.off{background:transparent;border:1px dashed var(--line);height:6px}
+@media (max-width:520px){.planrow{grid-template-columns:1fr}.planmini .pm span{font-size:10px}}

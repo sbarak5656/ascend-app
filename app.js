@@ -81,6 +81,7 @@ async function checkUpdates(){
     if (c.version > P.version){
       P = c;
       try { localStorage.setItem(CONTENT_KEY, JSON.stringify(c)); } catch (e) {}
+      applyPlan();
       route();
       toast(`Program updated to version ${c.version}: ${((c.changelog || [])[0] || {notes:[]}).notes.join("; ")}`, 8000);
       return { status:"updated", version:c.version };
@@ -147,7 +148,13 @@ function focusItem(k){
 }
 function dayItems(w, d){
   const day = P.weeks[w-1].days[d];
-  const extra = (S.focus || []).filter(k => P.library && P.library[k] && P.library[k].day === day.day).map(focusItem);
+  const areas = day.areas && day.areas.length ? day.areas : null;
+  const extra = (S.focus || []).filter(k => {
+    const e = P.library && P.library[k];
+    if (!e) return false;
+    const area = e.area || (e.day === "Thursday" ? "upper" : "lower");
+    return areas ? areas.includes(area) : e.day === day.day;
+  }).map(focusItem);
   return day.items.concat(extra);
 }
 const ik = (w, d, it) => `${w}-${d}-${it.id}`;
@@ -158,8 +165,13 @@ function progress(w, d){
   return { n, c, pct: n ? Math.round(100*c/n) : 0, done: !!S.done[dayKey(w,d)] };
 }
 function weekProgress(w){
-  let done = 0; for (let d=0; d<7; d++) if (S.done[dayKey(w,d)]) done++;
-  return done;
+  let done = 0, total = 0;
+  P.weeks[w-1].days.forEach((day, d) => {
+    if (day.rest) return;
+    total++;
+    if (S.done[dayKey(w, d)]) done++;
+  });
+  return { done, total };
 }
 /* where is "today" in the program? */
 function position(){
@@ -232,7 +244,14 @@ async function setAwake(on){
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.keepAwake) setAwake(true); });
 function dayKind(day){
-  const t = (day.title + " " + day.day).toLowerCase();
+  const a = day.areas;
+  if (Array.isArray(a) && (a.length || day.rest)){
+    if (a.includes("climb")) return "climb";
+    if (a.some(x => STRENGTH_AREAS.includes(x))) return "strength";
+    if (a.includes("cardio")) return "cardio";
+    return "rest";
+  }
+  const t = (day.title + " " + day.day).toLowerCase();       // content without modules
   if (/climb/.test(t)) return "climb";
   if (/strength|core|upper|lower|antagonist|posterior/.test(t)) return "strength";
   if (/cardio|zone|interval|circuit|conditioning|wind/.test(t)) return "cardio";
@@ -243,6 +262,82 @@ function dayStatus(w, d){
   const p = progress(w, d);
   return p.done ? "done" : (p.c > 0 ? "part" : "");
 }
+/* ---------------- weekly plan: which days train which body areas ---------------- */
+const AREA_ORDER = ["climb", "lower", "upper", "core", "cardio", "recovery"];
+const STRENGTH_AREAS = ["lower", "upper", "core"];
+const areaName = a => (P.areas || {})[a] || ({lower:"Lower body", upper:"Upper body", core:"Core", climb:"Climbing", cardio:"Cardio", recovery:"Recovery"})[a] || a;
+const defaultPlan = () => (P.plan_default || [["lower","core"],["cardio"],["climb"],["upper"],["climb"],["recovery"],["climb"]]).map(a => a.slice());
+function currentPlan(){
+  const d = S.plan && S.plan.days;
+  return (Array.isArray(d) && d.length === 7) ? d : defaultPlan();
+}
+const isWorkoutDay = tags => tags.some(t => t !== "recovery");
+const trainingDays = () => currentPlan().map((t, i) => isWorkoutDay(t) ? i : -1).filter(i => i >= 0);
+function mobilityFor(areas, when, first){
+  const mf = P.mobility_for || {};
+  const out = [];
+  (first || "").split(" or ").forEach(v => { if (v && P.mobility[when][v] && !out.includes(v)) out.push(v); });
+  areas.forEach(a => ((mf[a] || {})[when] || []).forEach(v => { if (P.mobility[when][v] && !out.includes(v)) out.push(v); }));
+  return out.slice(0, 3);
+}
+function resolveDay(week, d){
+  const dayName = DAY_NAMES[d];
+  const mods = week.modules;
+  if (!mods){                                   // content from before flexible plans: the fixed schedule
+    const base = (week.days0 || week.days)[d];
+    return Object.assign({}, base, { areas: [] });
+  }
+  const tags = currentPlan()[d] || [];
+  const areas = AREA_ORDER.filter(a => tags.includes(a));
+  if (!areas.length || (areas.length === 1 && areas[0] === "recovery" && false)){
+    return { day:dayName, title:"Rest day", items:[], note:"", areas:[], rest:true, pre:null,
+             post:mobilityFor(["recovery"], "post").join(" or ") || null };
+  }
+  const plan = currentPlan();
+  const climbBefore = plan.slice(0, d).filter(t => t.includes("climb")).length;
+  const parts = areas.map(a => {
+    if (a === "climb"){
+      const m = mods.climb[climbBefore % mods.climb.length];
+      return { area:a, title:m.title, items:m.items, note:"", pre:m.pre, post:m.post };
+    }
+    const m = mods[a];
+    return { area:a, title:m.title, items:m.items, note:m.note || "" };
+  });
+  const combined = parts.length > 1;
+  const items = [];
+  const used = {};
+  parts.forEach(pt => pt.items.forEach(it => {
+    const c = Object.assign({}, it);
+    if (combined && !c.block) c.block = areaName(pt.area);
+    let id = c.id || "item"; const n = used[id] = (used[id] || 0) + 1;
+    if (n > 1) c.id = id + "-" + n;
+    items.push(c);
+  }));
+  const strength = parts.filter(pt => STRENGTH_AREAS.includes(pt.area));
+  let title;
+  if (parts.length === 1) title = parts[0].title + (STRENGTH_AREAS.includes(parts[0].area) && mods.label ? " · " + mods.label : "");
+  else title = areas.map(areaName).join(" + ") + (strength.length && mods.label ? " · " + mods.label : "");
+  const climbPart = parts.find(pt => pt.area === "climb");
+  return {
+    day:dayName, title, items, areas,
+    note: (strength.find(pt => pt.note) || {}).note || "",
+    pre: mobilityFor(areas, "pre", climbPart && climbPart.pre).join(" or ") || null,
+    post: mobilityFor(areas, "post", climbPart && climbPart.post).join(" or ") || null
+  };
+}
+function applyPlan(){
+  P.weeks.forEach(w => {
+    if (!w.days0) w.days0 = w.days;
+    w.days = DAY_NAMES.map((_, d) => resolveDay(w, d));
+  });
+}
+function areaScheduled(area){ return currentPlan().some(t => t.includes(area)); }
+function savePlan(days){
+  S.plan = { days: days.map(t => AREA_ORDER.filter(a => t.includes(a))) };
+  save(); applyPlan();
+  if (S.reminders && S.reminders.on){ S.reminders.days = trainingDays(); save(); applyReminders(); }
+}
+
 function weekStrip(w, cur){
   const pos = position();
   return h("nav", {class:"strip", "aria-label":"Days of the week"}, P.weeks[w-1].days.map((day, i) => {
@@ -427,17 +522,23 @@ function sessionCard(w, d){
     items.push(renderItem(i));
   });
 
-  const mob = (kind, v) => {
-    if (!v) return null;
-    const first = v.split(" or ")[0];
-    const steps = P.mobility[kind][first].steps;
-    const mins = Math.round(secs(steps[steps.length-1].to) / 60);
-    return h("div", {class:"mob"},
-      h("span", {class:"mobic"}, icon("mobility")),
-      h("div", {class:"grow"},
-        h("b", {}, kind === "pre" ? "Pre-climb mobility" : "Post-session mobility"),
-        h("span", {class:"muted small"}, `${v.includes(" or ") ? "Variants" : "Variant"} ${v} · ${mins} min`)),
-      h("button", {class:"btn sm", onclick:() => openMobility(kind, v)}, "Open"));
+  const minsOf = (kind, v) => { const st = P.mobility[kind][v].steps; return Math.round(secs(st[st.length-1].to) / 60); };
+  const mobCard = () => {
+    if (!day.pre && !day.post) return null;
+    const row = (kind, v) => {
+      if (!v) return null;
+      const list = v.split(" or ").filter(x => P.mobility[kind][x]);
+      return h("div", {class:"mobrow"},
+        h("span", {class:"mobwhen"}, kind === "pre" ? "Before" : "After"),
+        h("div", {class:"chips", style:"margin:0"}, list.map(l =>
+          h("button", {class:"chip go", onclick:() => openMobility(kind, [l, ...list.filter(x => x !== l)].join(" or "))},
+            icon("mobility"), `${l} · ${P.mobility[kind][l].name} · ${minsOf(kind, l)} min`))));
+    };
+    return h("div", {class:"card mobcard"},
+      h("div", {class:"row spread", style:"margin-bottom:6px"}, h("h2", {style:"margin:0;font-size:16px"}, "Mobility for this workout"),
+        h("a", {class:"small", href:"#mobility"}, "All routines")),
+      day.areas.length ? h("p", {class:"muted small", style:"margin:0 0 10px"}, `Matched to: ${day.areas.map(areaName).join(" + ")}. Done separately from the strength work.`) : null,
+      row("pre", day.pre), row("post", day.post));
   };
 
   const awakeBtn = navigator.wakeLock ? h("button", {class:"glass" + (S.keepAwake ? " on" : ""), onclick:e => {
@@ -446,6 +547,18 @@ function sessionCard(w, d){
     toast(S.keepAwake ? "Screen will stay on while the app is open" : "Screen can sleep again");
   }}, icon("sun", 15), "Keep screen on") : null;
   if (S.keepAwake) setAwake(true);
+
+  if (day.rest){
+    return h("div", {},
+      h("section", {class:`hero p${phase.n}`},
+        h("div", {class:"kicker"}, `Week ${w} · ${phase.name}`),
+        h("h1", {style:"padding-right:0"}, "Rest day"),
+        h("div", {class:"sub"}, `${day.day} · recovery is where the training sticks`),
+        h("div", {class:"heroacts"}, h("a", {class:"glass", href:"#plan"}, "Change my plan"))),
+      h("div", {class:"callout info"}, "Nothing scheduled. Sleep, eat well and keep moving gently. A slow mobility flow is optional."),
+      mobCard(),
+      week.notes.map(n => h("div", {class:"callout warn"}, h("b", {}, "Note: "), n)));
+  }
 
   const card = h("div", {},
     h("section", {class:`hero p${phase.n}`},
@@ -456,9 +569,8 @@ function sessionCard(w, d){
       h("div", {class:"heroacts"}, count, awakeBtn)),
     week.intro.length ? h("div", {class:"callout info"}, week.intro) : null,
     day.note ? h("div", {class:"callout info small"}, h("b", {}, "Strength focus: "), day.note) : null,
-    mob("pre", day.pre),
+    mobCard(),
     h("ul", {class:"items", style:"margin:8px 0 14px"}, items),
-    mob("post", day.post),
     h("div", {style:"margin:14px 0"}, doneBtn),
     h("details", {class:"callout danger"}, h("summary", {}, "Pain rule — read if anything hurts"), h("p", {}, P.injury_stop_rule)),
     week.notes.map(n => h("div", {class:"callout warn"}, h("b", {}, "Note: "), n)));
@@ -497,7 +609,13 @@ views.today = () => {
 
 views.program = () => {
   const pos = position();
+  const plan = currentPlan();
   return [h("h1", {class:"page-title"}, "Program"),
+    h("div", {class:"card"},
+      h("div", {class:"row spread", style:"margin-bottom:10px"}, h("h2", {style:"margin:0"}, "Your weekly plan"), h("a", {class:"btn sm", href:"#plan"}, "Edit plan")),
+      h("div", {class:"planmini"}, plan.map((t, d) => h("div", {class:"pm" + (t.length ? "" : " off")},
+        h("b", {}, DAY_SHORT[d]),
+        h("span", {}, t.length ? t.map(areaName).join(" + ") : "Rest"))))),
     P.phases.map(ph => h("section", {style:"margin-bottom:22px"},
       h("div", {class:"phasehead"}, h("span", {class:`pill p${ph.n}`}, `Phase ${ph.n}`), h("h2", {style:"margin:0"}, `${ph.name} · Weeks ${ph.from}–${ph.to}`)),
       h("details", {class:"phaseintro"}, h("summary", {class:"small muted"}, "About this phase"), h("p", {class:"muted small", style:"margin:8px 0 0"}, ph.intro.join(" "))),
@@ -507,8 +625,8 @@ views.program = () => {
           now ? h("span", {class:"now-tag"}, "NOW") : null,
           h("div", {class:"n"}, `Week ${w.n} · ${w.name}`),
           h("div", {class:"tag"}, w.tag),
-          h("div", {class:"dots"}, w.days.map((_, i) => h("i", {class:S.done[dayKey(w.n, i)] ? "on" : ""}))),
-          h("div", {class:"small muted", style:"margin-top:6px"}, `${weekProgress(w.n)}/7 days done`));
+          h("div", {class:"dots"}, w.days.map((dd, i) => h("i", {class:dd.rest ? "off" : (S.done[dayKey(w.n, i)] ? "on" : "")}))),
+          h("div", {class:"small muted", style:"margin-top:6px"}, (wp => `${wp.done}/${wp.total} workouts done`)(weekProgress(w.n))));
       })))) ];
 };
 
@@ -550,17 +668,42 @@ views.day = (w, d) => {
 
 views.mobility = () => {
   const mins = r => Math.round(secs(r.steps[r.steps.length-1].to) / 60);
+  const mf = P.mobility_for || {};
+  const plan = currentPlan();
+  const usedFor = (kind, v) => AREA_ORDER.filter(a => ((mf[a] || {})[kind] || []).includes(v));
+  const openFirst = (kind, v, list) => openMobility(kind, [v, ...list.filter(x => x !== v)].join(" or "));
+
+  /* one row per kind of workout in the user's plan, with its days and the routines that go with it */
+  const present = AREA_ORDER.filter(a => plan.some(t => t.includes(a)) && a !== "recovery");
+  const matched = h("div", {class:"card"},
+    h("div", {class:"row spread", style:"margin-bottom:6px"}, h("h2", {style:"margin:0"}, "Matched to your workouts"), h("a", {class:"small", href:"#plan"}, "Edit plan")),
+    h("p", {class:"muted small", style:"margin:0 0 10px"}, "Strength sessions contain no mobility. These routines are linked to the body area you train and are suggested before and after each workout."),
+    present.map(a => {
+      const days = plan.map((t, d) => t.includes(a) ? DAY_SHORT[d] : null).filter(Boolean).join(" · ");
+      const chipsFor = kind => (mf[a] || {})[kind] ? h("div", {class:"mobrow"}, h("span", {class:"mobwhen"}, kind === "pre" ? "Before" : "After"),
+        h("div", {class:"chips", style:"margin:0"}, mf[a][kind].filter(v => P.mobility[kind][v]).map(v =>
+          h("button", {class:"chip go", onclick:() => openFirst(kind, v, mf[a][kind])}, `${v} · ${P.mobility[kind][v].name}`)))) : null;
+      return h("div", {class:"matchrow"}, h("div", {class:"row spread"}, h("b", {}, areaName(a)), h("span", {class:"muted small"}, days)),
+        chipsFor("pre"), chipsFor("post"));
+    }),
+    plan.some(t => t.includes("recovery")) ? h("div", {class:"matchrow"}, h("div", {class:"row spread"}, h("b", {}, "Recovery / rest days"),
+      h("span", {class:"muted small"}, plan.map((t, d) => t.includes("recovery") || !t.length ? DAY_SHORT[d] : null).filter(Boolean).join(" · "))),
+      h("div", {class:"mobrow"}, h("span", {class:"mobwhen"}, "Any time"),
+        h("div", {class:"chips", style:"margin:0"}, ((mf.recovery || {}).post || []).map(v => h("button", {class:"chip go", onclick:() => openFirst("post", v, mf.recovery.post)}, `${v} · ${P.mobility.post[v].name}`))))) : null);
+
   const block = (kind, title) => h("div", {class:"card"},
     h("div", {class:"row spread", style:"margin-bottom:6px"}, h("h2", {style:"margin:0"}, title),
       h("button", {class:"btn ghost sm", onclick:() => { const ks = Object.keys(P.mobility[kind]); openMobility(kind, ks[Math.floor(Math.random()*ks.length)]); }}, "🎲 Surprise me")),
     Object.entries(P.mobility[kind]).map(([v, r]) => h("div", {class:"mob"},
       h("span", {class:"mobic"}, icon("mobility")),
       h("div", {class:"grow"}, h("b", {}, `${v} · ${r.name}`), h("div", {class:"small muted"}, `${mins(r)} min · ${r.use}`),
-        r.tags ? h("div", {class:"chips"}, r.tags.map(t => h("span", {class:"chip"}, t))) : null),
+        h("div", {class:"chips"},
+          usedFor(kind, v).map(a => h("span", {class:"chip go"}, areaName(a))),
+          (r.tags || []).map(t => h("span", {class:"chip"}, t)))),
       h("button", {class:"btn sm", onclick:() => openMobility(kind, v)}, "Open"))));
   return [h("h1", {class:"page-title"}, "Mobility"),
-    h("p", {class:"muted"}, "Every climbing session starts with a pre-climb routine and every session ends with a post-workout one. Each day suggests a variant (★), but all of them are always available — or tap 🎲 to be surprised. Each has a guided timer."),
-    block("pre", "Pre-climb"), block("post", "Post-workout")];
+    h("p", {class:"muted"}, "Every workout is paired with routines for the area it trains. All routines are always available, or tap 🎲 to be surprised. Each has a guided timer."),
+    matched, block("pre", "Before a workout"), block("post", "After a workout")];
 };
 
 /* ---------------- backup + restore ---------------- */
@@ -636,7 +779,7 @@ async function applyReminders(){
   }
 }
 function remindersCard(){
-  const r = S.reminders = S.reminders || { on:false, time:"17:30", days:[0,1,2,3,4,6] };
+  const r = S.reminders = S.reminders || { on:false, time:"17:30", days:trainingDays() };
   const native = !!plug("LocalNotifications");
   const status = h("p", {class:"small muted", style:"margin:8px 0 0"});
   const apply = async () => {
@@ -655,6 +798,7 @@ function remindersCard(){
     h("label", {class:"row", style:"gap:12px"}, on, h("span", {}, "Remind me to train")),
     h("div", {class:"row", style:"margin-top:10px"}, h("span", {class:"muted small"}, "at"), time),
     h("div", {class:"chips"}, days),
+    h("div", {style:"margin-top:8px"}, h("button", {class:"chip go", onclick:() => { r.days = trainingDays(); save(); if (r.on) apply(); route(true); }}, "Use my workout days")),
     native ? null : h("p", {class:"small muted", style:"margin:8px 0 0"}, "Reminders work in the Android app."),
     status);
 }
@@ -728,7 +872,11 @@ function toggleFocus(k){
   const i = S.focus.indexOf(k);
   if (i >= 0) S.focus.splice(i, 1);
   else if (S.focus.length >= 4){ toast("Max 4 focus exercises at once — remove one first."); return false; }
-  else S.focus.push(k);
+  else {
+    S.focus.push(k);
+    const e = P.library[k], area = e && (e.area || (e.day === "Thursday" ? "upper" : "lower"));
+    if (area && !areaScheduled(area)) toast(`Added. Schedule a ${areaName(area).toLowerCase()} day in your plan to see it.`, 6000);
+  }
   save(); return true;
 }
 
@@ -924,6 +1072,66 @@ function testsReport(id){
 
 views.tests = (sub, id) => sub === "new" ? testsNew() : sub === "report" ? testsReport(id) : testsHub();
 
+/* ---- weekly plan editor ---- */
+views.plan = () => {
+  const plan = currentPlan();
+  const selectable = ["lower", "upper", "core", "climb", "cardio", "recovery"];
+  const toggle = (d, a) => {
+    const next = currentPlan().map(t => t.slice());
+    const i = next[d].indexOf(a);
+    if (i >= 0) next[d].splice(i, 1);
+    else {
+      if (a === "recovery") next[d] = [];                                   // recovery stands alone
+      else next[d] = next[d].filter(x => x !== "recovery");
+      next[d].push(a);
+    }
+    savePlan(next);
+    route(true);
+  };
+  const rows = DAY_NAMES.map((name, d) => h("div", {class:"planrow"},
+    h("div", {class:"pd"}, h("b", {}, name), plan[d].length ? null : h("span", {class:"muted small"}, "Rest")),
+    h("div", {class:"chips", style:"margin:0"}, selectable.map(a =>
+      h("button", {class:"chip" + (plan[d].includes(a) ? " on" : ""), "aria-pressed":plan[d].includes(a) ? "true" : "false", onclick:() => toggle(d, a)}, areaName(a))))));
+
+  /* sanity hints */
+  const tips = [];
+  for (const a of STRENGTH_AREAS){
+    for (let d = 0; d < 7; d++){
+      const n = (d + 1) % 7;
+      if (plan[d].includes(a) && plan[n].includes(a))
+        tips.push(`${areaName(a)} is on ${DAY_NAMES[d]} and ${DAY_NAMES[n]}. Leave about 48 hours between sessions that hit the same area.`);
+    }
+  }
+  const worked = plan.filter(isWorkoutDay).length;
+  if (worked === 7) tips.push("Every day is a workout day. Make at least one a full rest day or recovery day.");
+  if (worked === 0) tips.push("No workout days selected yet.");
+  const strengthDays = plan.filter(t => t.some(a => STRENGTH_AREAS.includes(a))).length;
+  if (worked && strengthDays === 0) tips.push("No strength sessions are scheduled. Pick lower, upper or core on at least two days.");
+
+  const presets = P.plan_presets || [{ id:"original", name:"Original program", days:defaultPlan(), about:"" }];
+  const sig = x => JSON.stringify(x.map(t => AREA_ORDER.filter(a => t.includes(a))));
+  const week = (position() && position().week >= 1 && position().week <= 12) ? position().week : 1;
+  const wk = P.weeks[week - 1];
+
+  return [
+    crumbs({t:"Program", href:"#program"}, {t:"Weekly plan"}),
+    h("h1", {class:"page-title"}, "Your weekly plan"),
+    h("p", {class:"muted"}, "Choose the days you train and what each day targets. Sessions are built from the week's program, so progression carries on whatever days you pick."),
+    h("div", {class:"card"}, h("h2", {}, "Start from a template"),
+      h("div", {class:"stack"}, presets.map(pr =>
+        h("button", {class:"preset" + (sig(pr.days) === sig(plan) ? " on" : ""), onclick:() => { savePlan(pr.days.map(t => t.slice())); route(true); toast(`Plan set: ${pr.name}`); }},
+          h("b", {}, pr.name), pr.about ? h("span", {class:"muted small"}, pr.about) : null)))),
+    h("div", {class:"card"}, h("h2", {}, "Days and body areas"), rows,
+      h("p", {class:"muted small", style:"margin:10px 0 0"}, "Tap to select more than one area on a day (for example lower + core). Leave a day empty for rest. Recovery is a light day.")),
+    tips.length ? h("div", {class:"callout warn"}, tips.map(t => h("div", {}, t))) : null,
+    h("div", {class:"card"}, h("h2", {}, `What this looks like (week ${week})`),
+      h("div", {class:"stack"}, wk.days.map((day, d) =>
+        h("a", {class:"planprev", href:`#day/${week}/${d}`},
+          h("span", {class:"d"}, DAY_SHORT[d]), h("span", {}, day.rest ? "Rest day" : day.title),
+          h("span", {class:"muted small"}, day.rest ? "" : `${day.items.length} ${day.items.length === 1 ? "item" : "items"}`))))),
+    h("div", {class:"row"}, h("button", {class:"btn ghost sm", onclick:() => { S.plan = null; save(); applyPlan(); route(true); toast("Back to the original program schedule"); }}, "Reset to original"))];
+};
+
 /* ---- log ---- */
 function weightChart(){
   const pts = S.weights.filter(x => x.date && x.kg).map(x => ({t:parseYmd(x.date).getTime(), kg:+x.kg})).sort((a,b) => a.t-b.t);
@@ -1001,14 +1209,14 @@ views.log = () => {
 views.info = () => [
   h("h1", {style:"margin-bottom:12px"}, P.title),
   h("div", {class:"card"}, h("p", {style:"margin-top:0"}, P.subtitle), P.goals.map(g => h("p", {class:"muted", style:"margin:4px 0"}, g)),
-    h("p", {class:"muted", style:"margin:4px 0"}, P.schedule_line), h("p", {class:"muted", style:"margin:4px 0"}, "Equipment: " + P.equipment)),
+    h("p", {class:"muted", style:"margin:4px 0"}, "Equipment: " + P.equipment)),
   h("div", {class:"card"}, h("h2", {}, "Overview"), h("p", {style:"margin:0"}, P.overview)),
   remindersCard(),
   updatesCard(),
   h("div", {class:"card"}, h("h2", {}, "Strength guide"), P.strength_guide.map(g => h("p", {}, h("b", {}, g.title + ". "), g.text))),
-  h("div", {class:"card"}, h("h2", {}, "Weekly schedule"), h("div", {class:"scroll"}, h("table", {},
-    h("thead", {}, h("tr", {}, h("th", {}, "Day"), h("th", {}, "Session"), h("th", {}, "Focus"))),
-    h("tbody", {}, P.weekly_schedule.slice(1).map(r => h("tr", {}, h("td", {}, r.day), h("td", {}, r.session), h("td", {}, r.focus))))))),
+  h("div", {class:"card"}, h("div", {class:"row spread"}, h("h2", {style:"margin:0"}, "Weekly plan"),
+    h("a", {class:"btn sm", href:"#plan"}, "Edit")),
+    h("p", {class:"muted small", style:"margin:8px 0 0"}, currentPlan().map((t, d) => DAY_SHORT[d] + ": " + (t.length ? t.map(areaName).join(" + ") : "Rest")).join("  ·  "))),
   h("div", {class:"card"}, h("h2", {}, "Injury management — read before starting"),
     P.injuries.map(i => h("p", {}, h("b", {}, i.label + ": "), i.text)),
     h("div", {class:"callout danger", style:"margin:0"}, P.injury_stop_rule)),
@@ -1049,7 +1257,7 @@ function updatesCard(){
 const TABS = [["today","Today","today"],["program","Program","program"],["mobility","Mobility","mobility"],["tests","Tests","tests"],["log","Log","log"],["info","Info","info"]];
 function route(keep){
   const [name, ...args] = (location.hash.slice(1) || "today").split("/");
-  const base = name === "week" || name === "day" ? "program" : name;
+  const base = name === "week" || name === "day" || name === "plan" ? "program" : name;
   const view = views[name] || views.today;
   document.getElementById("tabs").replaceChildren(...TABS.map(([k, t, ic]) =>
     h("a", {href:"#" + k, class:k === base ? "on" : "", "aria-current":k === base ? "page" : null}, icon(ic), h("span", {}, t))));
@@ -1067,6 +1275,7 @@ document.getElementById("theme").onclick = () => {
 };
 try { const t = localStorage.getItem(KEY + ".theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
 
+applyPlan();
 route();
 try { localStorage.removeItem("climbprog.ui.pending"); } catch (e) {}   // this interface started fine
 

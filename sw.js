@@ -1,5 +1,5 @@
 /* Offline cache for the climbing program PWA. Bump VERSION when files change. */
-const VERSION = "ascend-v4";
+const VERSION = "ascend-v5";
 const FILES = [
   "./", "./index.html", "./app.css", "./app.js", "./ui-version.js", "./program.js", "./config.js", "./manifest.webmanifest",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/icon-maskable-512.png",
