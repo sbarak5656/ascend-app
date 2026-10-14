@@ -13,7 +13,7 @@ try {
 } catch (e) {}
 
 /* ---------------- state ---------------- */
-const blankState = () => ({ schema:2, start:"", checks:{}, sets:{}, done:{}, grades:{}, weights:[], notes:{}, swaps:{},
+const blankState = () => ({ schema:2, start:"", checks:{}, sets:{}, kit:null, equip:{}, done:{}, grades:{}, weights:[], notes:{}, swaps:{},
                             tests:[], focus:[], contentUrl:"", lastCheck:"" });
 let S = blankState();
 try {
@@ -144,9 +144,22 @@ const dayKey = (w,d) => `${w}-${d}`;
 function focusItem(k){
   const e = P.library[k], rest = (e.rx.match(/rest (\d+)s/) || [])[1];
   return { id:"focus-" + k, key:k, name:e.name, rx:e.rx, cue:e.cue, note:"", detail:e.rx + ". " + e.cue, text:e.name + " — " + e.rx,
-           alts:e.alts, block:"Focus add-on · from your tests", focus:true, rest: rest ? +rest : undefined };
+           alts:e.alts, needs:e.needs || [], group:e.group || "", block:"Focus add-on · from your tests", focus:true, rest: rest ? +rest : undefined };
 }
-function dayItems(w, d){
+/* ---------------- equipment-aware tailoring ---------------- */
+const eqList = () => P.equipment || [];
+const eqName = id => (eqList().find(e => e.id === id) || { name:id }).name;
+const kitDefault = () => Array.isArray(S.kit) ? S.kit : (P.equipment_default || []);
+const kitFor = (w, d) => (S.equip && Array.isArray(S.equip[dayKey(w, d)])) ? S.equip[dayKey(w, d)] : kitDefault();
+const hasAll = (needs, E) => (needs || []).every(n => E.has(n));
+const missingOf = (needs, E) => (needs || []).filter(n => !E.has(n));
+function adaptRx(itemRx, candRx){
+  const a = (itemRx || "").match(/^(\d+)×/), b = (candRx || "").match(/^(\d+)×(.*)$/);
+  return a && b ? `${a[1]}×${b[2]}` : (candRx || itemRx || "");     // keep the set count, take the substitute's reps/rest
+}
+
+/* the session's exercises before any equipment tailoring (day items + pinned focus add-ons) */
+function rawDayItems(w, d){
   const day = P.weeks[w-1].days[d];
   const areas = day.areas && day.areas.length ? day.areas : null;
   const extra = (S.focus || []).filter(k => {
@@ -157,6 +170,64 @@ function dayItems(w, d){
   }).map(focusItem);
   return day.items.concat(extra);
 }
+
+/* Replace what can't be done with what's available:
+   1) one of the exercise's own swap options that fits the kit, 2) another exercise from the same movement family
+   (then fallback families), 3) otherwise skip it and say why. Sets/reps/rest follow the original prescription. */
+function tailorItems(items, kit){
+  const E = new Set(kit);
+  const lib = P.library || {};
+  const fallback = P.group_fallback || {};
+  const rank = { swap:0, easier:1, harder:2 };
+  const taken = new Set(items.map(i => i.key).filter(Boolean));
+  const usedNames = new Set(items.map(i => i.name).filter(Boolean));    // never use the same exercise twice in a workout
+  const out = [], skipped = [];
+  let adapted = 0;
+  items.forEach(it => {
+    const needs = it.needs || [];
+    if (!needs.length || hasAll(needs, E)){ out.push(it); return; }
+    const missing = missingOf(needs, E);
+    const own = (it.alts || []).map((a, i) => ({ a, i })).filter(x => hasAll(x.a.needs, E) && !usedNames.has(x.a.name))
+      .sort((p, q) => (rank[p.a.kind] - rank[q.a.kind]) || ((p.a.needs || []).length - (q.a.needs || []).length));
+    if (own.length){
+      usedNames.add(it.alts[own[0].i].name);
+      out.push(Object.assign({}, it, { auto:{ altIndex:own[0].i, missing } }));
+      adapted++;
+      return;
+    }
+    const area = (lib[it.key] || {}).area;
+    const families = [it.group, ...(fallback[it.group] || [])].filter(Boolean);
+    for (const g of families){
+      const cands = Object.entries(lib).filter(([k, e]) => e.group === g && !taken.has(k) && !usedNames.has(e.name) && hasAll(e.needs, E) &&
+        (g !== it.group || !area || e.area === area));
+      if (!cands.length) continue;
+      cands.sort((p, q) => (p[1].needs || []).length - (q[1].needs || []).length);
+      const [k, e] = cands[0];
+      taken.add(k);
+      usedNames.add(e.name);
+      const alts = (it.alts || []).concat([{ kind:"swap", name:e.name, detail:e.cue, needs:e.needs || [], rx:adaptRx(it.rx, e.rx) }]);
+      out.push(Object.assign({}, it, { alts, auto:{ altIndex:alts.length - 1, missing } }));
+      adapted++;
+      return;
+    }
+    // nothing fits: say what would bring it back (cheapest kits first)
+    const opts = [];
+    const addOpt = n => { if (n && n.length && !opts.some(o => o.join() === n.join())) opts.push(n); };
+    (it.alts || []).forEach(a => addOpt(a.needs));
+    families.forEach(g => Object.values(lib).filter(x => x.group === g).forEach(x => addOpt(x.needs)));
+    opts.sort((a, b) => a.length - b.length);
+    skipped.push({ item:it, missing, options:opts.filter(o => !o.some(n => missing.includes(n))).slice(0, 3) });
+  });
+  return { items:out, skipped, adapted };
+}
+function tailoredDay(w, d){
+  const day = P.weeks[w-1].days[d];
+  const kit = kitFor(w, d);
+  const base = rawDayItems(w, d);
+  if (day.rest) return { items:base, skipped:[], adapted:0, kit, base };
+  return Object.assign(tailorItems(base, kit), { kit, base });
+}
+function dayItems(w, d){ return tailoredDay(w, d).items; }
 const ik = (w, d, it) => `${w}-${d}-${it.id}`;
 function progress(w, d){
   const items = dayItems(w, d);
@@ -468,7 +539,8 @@ function phasePill(w){ const p = phaseOf(w); return h("span", {class:`pill p${p.
 function sessionCard(w, d){
   const week = P.weeks[w-1], day = week.days[d];
   const key = dayKey(w, d), phase = phaseOf(w);
-  const all = dayItems(w, d);
+  const td = tailoredDay(w, d);
+  const all = td.items;
   const ringEl = ring(0), count = h("span", {class:"glass num"});
   const sbar = h("i", {}), stext = h("b", {});
   const doneBtn = h("button", {class:"btn block"});
@@ -495,7 +567,11 @@ function sessionCard(w, d){
   const renderItem = i => {
     const it = all[i];
     const ck = ik(w, d, it);
-    const alt = S.swaps[ck] != null && it.alts ? it.alts[S.swaps[ck]] : null;
+    const manual = S.swaps[ck];                       // undefined = follow the equipment tailoring, -1 = original on purpose
+    const alt = manual === -1 ? null
+      : (manual != null && it.alts ? it.alts[manual]
+        : (it.auto && it.alts ? it.alts[it.auto.altIndex] : null));
+    const adaptedFor = manual == null && it.auto ? it.auto.missing : null;
     const baseRx = it.rx || "";
     const rx = alt ? (alt.rx !== undefined ? alt.rx : baseRx) : baseRx;
     const name = alt ? alt.name : it.name;
@@ -547,12 +623,26 @@ function sessionCard(w, d){
     if (restSec) meta.push(h("button", {class:"chip go", onclick:() => startRest(restSec, "Rest · " + label)}, icon("timer"), `${restSec}s rest`));
 
     const tools = [];
+    if (adaptedFor) tools.push(h("span", {class:"chip adapt"}, icon("swap"), "Adapted · no " + adaptedFor.map(eqName).join(", ").toLowerCase()));
     let panel = null;
     if (it.alts && it.alts.length){
-      const choose = idx => { idx == null ? delete S.swaps[ck] : S.swaps[ck] = idx; save(); li.replaceWith(renderItem(i)); };
-      const opt = (idx, kind, nm, cueText) => h("button", {class:"opt" + (S.swaps[ck] == idx || (idx == null && S.swaps[ck] == null) ? " on" : ""), onclick:() => choose(idx)},
-        h("span", {class:"kind " + (kind || "")}, kind ? KIND[kind] : "Original"), h("b", {}, nm), cueText ? h("span", {class:"muted small"}, cueText) : null);
-      panel = h("div", {class:"swaps", hidden:true}, opt(null, null, it.name || it.text.slice(0, 40)), it.alts.map((a, idx) => opt(idx, a.kind, a.name, a.detail)));
+      const kitSet = new Set(td.kit);
+      const effIdx = manual != null ? manual : (it.auto ? it.auto.altIndex : null);
+      const choose = idx => {
+        if (idx == null){ if (it.auto) S.swaps[ck] = -1; else delete S.swaps[ck]; }
+        else S.swaps[ck] = idx;
+        save(); li.replaceWith(renderItem(i));
+      };
+      const opt = (idx, kind, nm, cueText, needs) => {
+        const lacking = missingOf(needs, kitSet);
+        const on = idx == null ? (effIdx == null || effIdx === -1) : effIdx === idx;
+        return h("button", {class:"opt" + (on ? " on" : "") + (lacking.length ? " unavail" : ""), onclick:() => choose(idx)},
+          h("span", {class:"kind " + (kind || "")}, kind ? KIND[kind] : "Original"), h("b", {}, nm),
+          lacking.length ? h("span", {class:"need small"}, "Needs " + lacking.map(eqName).join(", ")) : null,
+          cueText ? h("span", {class:"muted small"}, cueText) : null);
+      };
+      panel = h("div", {class:"swaps", hidden:true}, opt(null, null, it.name || it.text.slice(0, 40), "", it.needs),
+        it.alts.map((a, idx) => opt(idx, a.kind, a.name, a.detail, a.needs)));
       tools.push(h("button", {class:"chip go", onclick:() => { panel.hidden = !panel.hidden; }}, icon("swap"), alt ? "Swapped" : `Swap (${it.alts.length})`));
     }
     if (alt) tools.push(h("a", {class:"chip", href:youtube(alt.name), target:"_blank", rel:"noopener"}, icon("play"), "Form"));
@@ -565,7 +655,7 @@ function sessionCard(w, d){
       setsEl,
       plain ? h("div", {class:"txt muted"}, plain) : null,
       note ? h("div", {class:"note"}, note) : null,
-      alt ? h("div", {class:"swapnote"}, "Swapped from: " + (it.name || it.text.slice(0, 40))) : null,
+      alt ? h("div", {class:"swapnote"}, (adaptedFor ? "Adapted from: " : "Swapped from: ") + (it.name || it.text.slice(0, 40))) : null,
       cue ? h("details", {}, h("summary", {}, "How to do it"), h("p", {}, cue)) : null,
       tools.length ? h("div", {class:"chips"}, tools) : null,
       panel));
@@ -576,6 +666,25 @@ function sessionCard(w, d){
     if (it.block && it.block !== (all[i-1] || {}).block) items.push(h("li", {class:"blockhead"}, it.block));
     items.push(renderItem(i));
   });
+
+  const hasEquipmentModel = day.items.some(x => x.needs !== undefined);
+  const eqCard = () => {
+    if (!hasEquipmentModel || day.rest) return null;
+    const overridden = Array.isArray(S.equip && S.equip[key]);
+    const names = td.kit.map(eqName);
+    const summary = names.length ? names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3} more` : "") : "Bodyweight only";
+    const note = (td.adapted || td.skipped.length)
+      ? `Tailored to your equipment: ${td.adapted} swapped${td.skipped.length ? ` · ${td.skipped.length} skipped` : ""}.` : "Nothing needs changing: everything in this workout fits your equipment.";
+    return h("div", {class:"card eqcard"},
+      h("div", {class:"row spread"},
+        h("div", {}, h("b", {}, "Equipment"), h("div", {class:"muted small"}, summary + (overridden ? " · this workout" : " · your default"))),
+        h("button", {class:"btn sm ghost", onclick:() => openEquipment(w, d)}, "Change")),
+      h("p", {class:"eqnote small"}, note),
+      td.skipped.length ? h("details", {}, h("summary", {class:"small"}, `Skipped — needs equipment you don't have (${td.skipped.length})`),
+        h("ul", {class:"skiplist"}, td.skipped.map(x => h("li", {}, h("b", {}, x.item.name || x.item.text.slice(0, 40)),
+          h("div", {class:"muted small"}, "Needs " + x.missing.map(eqName).join(", ") +
+            (x.options && x.options.length ? ". Or do an equivalent with: " + x.options.map(o => o.map(eqName).join(" + ")).join("  /  ") : "")))))) : null);
+  };
 
   const minsOf = (kind, v) => { const st = P.mobility[kind][v].steps; return Math.round(secs(st[st.length-1].to) / 60); };
   const mobCard = () => {
@@ -626,6 +735,7 @@ function sessionCard(w, d){
     week.intro.length ? h("div", {class:"callout info"}, week.intro) : null,
     day.note ? h("div", {class:"callout info small"}, h("b", {}, "Strength focus: "), day.note) : null,
     mobCard(),
+    eqCard(),
     h("ul", {class:"items", style:"margin:8px 0 14px"}, items),
     h("div", {style:"margin:14px 0"}, doneBtn),
     h("details", {class:"callout danger"}, h("summary", {}, "Pain rule — read if anything hurts"), h("p", {}, P.injury_stop_rule)),
@@ -798,6 +908,55 @@ views.mobility = () => {
     h("p", {class:"muted"}, "Every workout is paired with routines for the area it trains. All routines are always available, or tap 🎲 to be surprised. Each has a guided timer."),
     matched, block("pre", "Before a workout"), block("post", "After a workout")];
 };
+
+/* ---------------- equipment picker ---------------- */
+function openEquipment(w, d){
+  const scoped = w != null;
+  const key = scoped ? dayKey(w, d) : null;
+  let sel = new Set(scoped ? kitFor(w, d) : kitDefault());
+  const base = scoped ? rawDayItems(w, d) : null;
+  const sheet = document.getElementById("sheet");
+  const render = () => {
+    const groups = [...new Set(eqList().map(e => e.group))];
+    const preview = scoped ? tailorItems(base, [...sel]) : null;
+    sheet.replaceChildren(
+      h("div", {class:"row spread"},
+        h("h2", {}, scoped ? "Equipment for this workout" : "My default equipment"),
+        h("button", {class:"iconbtn", onclick:closeModal, "aria-label":"Close"}, "✕")),
+      h("p", {class:"muted small", style:"margin:0 0 8px"}, scoped
+        ? "Tick what you have available right now. The workout is rebuilt around it: unavailable exercises are swapped for equivalents, or skipped."
+        : "What you usually have. New workouts start from this, and you can change it for any single workout."),
+      h("div", {class:"chips", style:"margin:0 0 6px"}, (P.equipment_presets || []).map(pr =>
+        h("button", {class:"chip go", onclick:() => { sel = new Set(pr.items); render(); }}, pr.name))),
+      ...groups.map(g => h("div", {},
+        h("div", {class:"eqgroup"}, g),
+        h("div", {class:"eqgrid"}, eqList().filter(e => e.group === g).map(e =>
+          h("button", {class:"eqtile" + (sel.has(e.id) ? " on" : ""), "aria-pressed":sel.has(e.id) ? "true" : "false",
+            onclick:() => { sel.has(e.id) ? sel.delete(e.id) : sel.add(e.id); render(); }},
+            h("span", {class:"eqcheck"}, sel.has(e.id) ? icon("check", 14) : null), e.name))))),
+      preview ? h("div", {class:"callout info small", style:"margin:12px 0 0"},
+        preview.adapted || preview.skipped.length
+          ? `With this kit: ${preview.adapted} exercise${preview.adapted === 1 ? "" : "s"} swapped${preview.skipped.length ? `, ${preview.skipped.length} skipped` : ""}.`
+          : "With this kit nothing in the workout needs changing.") : null,
+      h("div", {class:"row", style:"margin-top:14px"},
+        scoped ? h("button", {class:"btn", onclick:() => { S.equip = S.equip || {}; S.equip[key] = [...sel]; save(); closeModal(); route(true); }}, "Use for this workout") : null,
+        h("button", {class:scoped ? "btn ghost" : "btn", onclick:() => {
+          S.kit = [...sel];
+          if (scoped && S.equip) delete S.equip[key];
+          save(); closeModal(); route(true); toast("Default equipment saved");
+        }}, scoped ? "Make this my default" : "Save default"),
+        scoped && S.equip && Array.isArray(S.equip[key]) ? h("button", {class:"chip", onclick:() => { delete S.equip[key]; save(); closeModal(); route(true); }}, "Reset to default") : null));
+  };
+  render();
+  document.getElementById("modal").style.display = "flex";
+}
+function equipmentCard(){
+  const names = kitDefault().map(eqName);
+  return h("div", {class:"card"},
+    h("div", {class:"row spread"}, h("h2", {style:"margin:0"}, "My equipment"), h("button", {class:"btn sm", onclick:() => openEquipment()}, "Edit")),
+    h("p", {class:"muted small", style:"margin:8px 0 0"}, names.length ? names.join(" · ") : "Bodyweight only"),
+    h("p", {class:"muted small", style:"margin:6px 0 0"}, "Workouts are tailored to this kit. You can also change it for a single workout from the session page."));
+}
 
 /* ---------------- backup + restore ---------------- */
 const backupJson = () => JSON.stringify({ app:"ascend", exported:new Date().toISOString(), state:S }, null, 1);
@@ -1210,6 +1369,7 @@ views.plan = () => {
     crumbs({t:"Program", href:"#program"}, {t:"Weekly plan"}),
     h("h1", {class:"page-title"}, "Your weekly plan"),
     h("p", {class:"muted"}, "Choose the days you train and what each day targets. Sessions are built from the week's program, so progression carries on whatever days you pick."),
+    equipmentCard(),
     h("div", {class:"card"}, h("h2", {}, "Start from a template"),
       h("div", {class:"stack"}, presets.map(pr =>
         h("button", {class:"preset" + (sig(pr.days) === sig(plan) ? " on" : ""), onclick:() => { savePlan(pr.days.map(t => t.slice())); route(true); toast(`Plan set: ${pr.name}`); }},
@@ -1304,6 +1464,7 @@ views.info = () => [
   h("div", {class:"card"}, h("p", {style:"margin-top:0"}, P.subtitle), P.goals.map(g => h("p", {class:"muted", style:"margin:4px 0"}, g)),
     h("p", {class:"muted", style:"margin:4px 0"}, "Equipment: " + P.equipment)),
   h("div", {class:"card"}, h("h2", {}, "Overview"), h("p", {style:"margin:0"}, P.overview)),
+  equipmentCard(),
   remindersCard(),
   updatesCard(),
   h("div", {class:"card"}, h("h2", {}, "Strength guide"), P.strength_guide.map(g => h("p", {}, h("b", {}, g.title + ". "), g.text))),

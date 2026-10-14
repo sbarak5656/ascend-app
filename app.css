@@ -363,3 +363,19 @@ nav.tabs a.on svg{stroke-width:2.3}
 .confetti i{position:absolute;top:-16px;width:9px;height:15px;border-radius:2px;opacity:0;animation:fall 1.7s cubic-bezier(.2,.7,.4,1) forwards}
 @keyframes fall{0%{opacity:1;transform:translate(0,0) rotate(0)}100%{opacity:.85;transform:translate(var(--dx),105vh) rotate(var(--r))}}
 @media (prefers-reduced-motion:reduce){.confetti{display:none}}
+
+/* ---- equipment ---- */
+.eqcard{padding:14px 16px}
+.eqnote{margin:8px 0 0;color:var(--muted)}
+.skiplist{margin:8px 0 0;padding-left:18px}
+.skiplist li{margin:4px 0}
+.chip.adapt{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 35%,transparent);color:var(--accent);cursor:default}
+.eqgroup{margin:14px 0 6px;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.eqgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.eqtile{display:flex;align-items:center;gap:10px;text-align:left;padding:12px;border-radius:14px;border:1.5px solid var(--line);background:var(--card-2);font-weight:650;min-height:48px;transition:background .15s,border-color .15s}
+.eqtile.on{border-color:var(--accent);background:var(--accent-soft)}
+.eqcheck{width:22px;height:22px;flex:none;border-radius:7px;border:2px solid var(--line);display:grid;place-items:center;background:var(--card);color:#fff}
+.eqtile.on .eqcheck{background:var(--accent);border-color:var(--accent)}
+.swaps .opt.unavail{opacity:.62}
+.swaps .opt .need{grid-column:2;color:var(--p3);font-weight:700}
+@media (max-width:520px){.swaps .opt .need{grid-column:1}}
